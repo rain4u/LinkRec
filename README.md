@@ -2,6 +2,15 @@
 
 Recommendation Engine + Ranking Engine
 
+# Database - HBase
+
+Every row is a line for link information
+
+Two column families: 'link' and 'user'
+
+1. 'link' family is for link properties like 'link:url', 'link:title', 'link:time'
+2. 'user' family is for the users who shared this link. user_id is stored in the column 'user:user_id' ?
+
 # Recommendation Engine
 
 1. Load Training Data - From HBase
@@ -23,7 +32,7 @@ Ranking based on the following criteria:
 
 Send grabbed data to recommendation server
 ```
-Request: POST /url with { user: id, link: url, title: name, date: timestamp }
+Request: POST /url with { user: id, link: url, title: name, time: timestamp }
 Response: -
 ```
 
