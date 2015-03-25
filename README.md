@@ -13,6 +13,7 @@ Recommendation Engine + Ranking Engine
 # Ranking Engine
 
 Ranking based on the following criteria:
+
 1. Index in recommendation result
 2. Popularity
 3. Freshness
