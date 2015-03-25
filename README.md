@@ -32,13 +32,13 @@ Ranking based on the following criteria:
 
 Send grabbed data to recommendation server
 ```
-Request: POST /url with { user: id, links: [ { link: url, title: name, time: timestamp }, ... ] }
+Request: POST /url with { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
 Response: -
 ```
 
 Get recommendation result from server
 ```
 Request: GET /url with { user: id }
-Response: { reclinks: [ { link: url, title: name }, { link: url, title: name }, ... ] }
+Response: { reclinks: [ { url: url, title: name }, { url: url, title: name }, ... ] }
 ```
 
