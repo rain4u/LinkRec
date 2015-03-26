@@ -37,13 +37,13 @@ http://54.186.129.251:3000
 
 Send grabbed data to recommendation server
 ```
-Request: POST /sendLinks with { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
+Request: POST /sendLink with { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
 Response: -
 ```
 
 Get recommendation result from server
 ```
-Request: GET /getRecLinks with { user: id }
+Request: GET /getRec with { user: id }
 Response: { reclinks: [ { url: url, title: name }, { url: url, title: name }, ... ] }
 ```
 
