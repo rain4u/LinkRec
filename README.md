@@ -30,15 +30,20 @@ Ranking based on the following criteria:
 
 ## API
 
+Server
+```
+http://54.186.129.251:3000
+```
+
 Send grabbed data to recommendation server
 ```
-Request: POST /url with { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
+Request: POST /sendLinks with { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
 Response: -
 ```
 
 Get recommendation result from server
 ```
-Request: GET /url with { user: id }
+Request: GET /getRecLinks with { user: id }
 Response: { reclinks: [ { url: url, title: name }, { url: url, title: name }, ... ] }
 ```
 
