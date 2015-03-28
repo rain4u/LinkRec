@@ -9,7 +9,7 @@ Every row is a line for link information
 Two column families: 'link' and 'user'
 
 1. 'link' family is for link properties like 'link:url', 'link:title', 'link:time'
-2. 'user' family is for the users who shared this link. user_id is stored in the column 'user:user_id' ?
+2. 'user' family is for the users who shared this link. 1.0 can be stored in the column 'user:id'. We may choose some valuable info in this cell to help ranking.
 
 ## Recommendation Engine
 
@@ -29,11 +29,6 @@ Ranking based on the following criteria:
 4. ...
 
 ## API
-
-Server
-```
-http://54.186.129.251:3000
-```
 
 Send grabbed data to recommendation server
 ```
