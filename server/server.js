@@ -13,9 +13,13 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 app.get('/getRec', function(req, res){
 
-  var command = '/usr/local/spark/bin/spark-submit --class org.linkourmet.LinkourmetALS --jars /usr/local/hbase/lib/hbase-protocol-1.0.0.jar,/usr/local/hbase/lib/hbase-common-1.0.0.jar,/usr/local/hbase/lib/hbase-client-1.0.0.jar,/usr/local/hbase/lib/zookeeper-3.4.6.jar,/usr/local/hbase/lib/guava-12.0.1.jar,/usr/local/hbase/lib/protobuf-java-2.5.0.jar,/usr/local/hbase/lib/htrace-core-3.1.0-incubating.jar,/usr/local/hbase/lib/hbase-server-1.0.0.jar ~/target/scala-2.10/linkourmet_2.10-1.0.jar ' + req.query.user; 
+  var command = '/usr/local/spark/bin/spark-submit --class LinkRec --jars /usr/local/hbase/lib/hbase-protocol-1.0.0.jar,/usr/local/hbase/lib/hbase-common-1.0.0.jar,/usr/local/hbase/lib/hbase-client-1.0.0.jar,/usr/local/hbase/lib/zookeeper-3.4.6.jar,/usr/local/hbase/lib/guava-12.0.1.jar,/usr/local/hbase/lib/protobuf-java-2.5.0.jar,/usr/local/hbase/lib/htrace-core-3.1.0-incubating.jar,/usr/local/hbase/lib/hbase-server-1.0.0.jar,/home/ec2-user/linkrec/lib/grizzled-slf4j_2.10-1.0.2.jar ~/linkrec/target/scala-2.10/linkrec_2.10-1.0.jar ' + req.query.user;
 
   exec(command, function (error, stdout, stderr) {
+
+    console.log('[Output]');
+    console.log(stdout);
+
     res.json(JSON.parse(stdout));
   });
 
@@ -24,10 +28,25 @@ app.get('/getRec', function(req, res){
 
 // send link api
 
+function escape(str) {
+  return str
+    .replace(/[\\]/g, '\\\\')
+    .replace(/[\"]/g, '\\\"')
+    .replace(/[\/]/g, '\\/')
+    .replace(/[\b]/g, '\\b')
+    .replace(/[\f]/g, '\\f')
+    .replace(/[\n]/g, '\\n')
+    .replace(/[\r]/g, '\\r')
+    .replace(/[\t]/g, '\\t');
+}
+
 function writeToDB(input) {
   // for input, only one user and a list of links
   // { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
   
+  console.log('[Input]');
+  console.log(input);
+
   var data = {'Row': [{}]};
 
   var user = new Buffer(input.user).toString('base64');
@@ -41,8 +60,8 @@ function writeToDB(input) {
 
   for (var i = 0; i < linkNum; i++) {
     
-    var column = new Buffer('link:' + links[i].url).toString('base64');
-    var value = new Buffer(links[i].title).toString('base64');
+    var column = new Buffer('link:' + escape(links[i].url)).toString('base64');
+    var value = new Buffer(escape(links[i].title)).toString('base64');
     var timestamp = links[i].time;
     
     var cell = {'timestamp': timestamp, 'column': column, '$': value};
@@ -51,6 +70,9 @@ function writeToDB(input) {
   }
 
   var status = {'code': 200, 'message': ''};
+
+  console.log('[Request Data]');
+  console.log(JSON.stringify(data));
 
   request({
     url: 'http://localhost:8000/linkrec/falserow',
@@ -84,6 +106,7 @@ function createTable(schema, res) {
     body: schema
   }, function (error, response, body){
     if (!error) {
+      console.log('[Reset] Table Reset');
       res.status(200).end();
     }
   });
