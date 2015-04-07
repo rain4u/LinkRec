@@ -105,8 +105,8 @@ object LinkRec {
   }
 
   def getBestModel(data: RDD[Rating]): MatrixFactorizationModel = {
-    val rank = 5
-    val numIterations = 10
+    val rank = 10
+    val numIterations = 20
     val model = ALS.trainImplicit(data, rank, numIterations)
     return model;
   }
