@@ -19,6 +19,8 @@ object LinkRec {
   final val TRAINING_RANK = 10
   final val TRAINING_NUM_ITERATIONS = 20
   final val RECOMMENDATION_NUMBER = 20
+  final val RANK_WEIGHT_SHARE_TIME = 0.25
+  final val RANK_WEIGHT_PREDICT_RATING = 0.75
 
   val logger = Logger("LinkRec")
 
@@ -36,10 +38,9 @@ object LinkRec {
     val targetUser = args(0)
 
     val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0))
-    val recommendation = predict(ratingData, targetUser)
-    logger.debug(recommendation.mkString("\n"))
+    val recommendation: Array[Rating] = predict(ratingData, targetUser)
 
-    val reclinks = rank(recommendation.map(_.product), data)
+    val reclinks = rank(recommendation, data)
 
     var linkTitleMap = data.filter(tuple => reclinks.contains(tuple._2))
                            .map(tuple => (tuple._2, tuple._3))
@@ -54,6 +55,8 @@ object LinkRec {
     sc.stop()
   }
 
+
+
   def init(): SparkContext = {
     logger.debug("start initializing spark")
 
@@ -63,6 +66,8 @@ object LinkRec {
     logger.debug("complete initializing spark")
     return sc
   }
+
+
 
   def loadDataFromDB(sc: SparkContext): RDD[(String, String, String, Long)] = {
     logger.debug("start loading data")
@@ -86,6 +91,8 @@ object LinkRec {
     return ratings
   }
 
+
+
   def predict(ratings: RDD[Rating], user: String): Array[Rating] = {
     logger.debug("start predicting")
 
@@ -97,9 +104,9 @@ object LinkRec {
 
     val userData = unsharedLinks.map((user, _))
 
-    val prediction = model.predict(userData).collect().filter(_.rating >= 0).sortBy(-_.rating).take(RECOMMENDATION_NUMBER)
+    val prediction = model.predict(userData).filter(_.rating >= 0).sortBy(_.rating, false).take(RECOMMENDATION_NUMBER)
 
-    logger.debug("complete predicting")
+    logger.debug("complete predicting; prediction result\n" + prediction.mkString("\n"))
     return prediction
   }
 
@@ -112,28 +119,67 @@ object LinkRec {
     return model
   }
 
-  def rank(urls: Array[String], data: RDD[(String, String, String, Long)]): Array[String] = {
+
+
+  def rank(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
     logger.debug("start ranking")
 
-    val timeScore = data.filter(tuple => urls.contains(tuple._2))
+    val reclinks = rankByScaledValue(recommendation, metadata)
+
+    logger.debug("complete ranking")
+    return reclinks
+  }
+
+  def rankByIndex(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
+    val urls = recommendation.map(_.product)
+    val timeScore = metadata.filter(tuple => urls.contains(tuple._2))
          .map(tuple => (tuple._2, tuple._4))
          .reduceByKey( (a, b) => max(a, b) )
          .collect()
          .sortBy(-_._2)
          .map(_._1)
          .zipWithIndex
-         .map(tuple => (tuple._1, tuple._2 * 0.25) )
+         .map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_SHARE_TIME) )
 
-    val ratingScore = urls.zipWithIndex.map(tuple => (tuple._1, tuple._2 * 0.75) )
+    val ratingScore = urls.zipWithIndex.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_PREDICT_RATING) )
 
-    val rankedUrls = ( timeScore ++ ratingScore ).groupBy(_._1)
+    val overallScore = ( timeScore ++ ratingScore ).groupBy(_._1)
                                                     .mapValues(_.map(_._2).sum)
                                                     .toArray
                                                     .sortBy(_._2)
-                                                    .map(_._1)
-
-    logger.debug("complete ranking")
-    return rankedUrls
+    
+    logger.debug("overallScore\n" + overallScore.mkString("\n"))
+    return overallScore.map(_._1)
   }
 
+  def rankByScaledValue(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
+    val predictRatings = recommendation.map(item => (item.product, item.rating) )
+    val scaledPredictRatings = scale(predictRatings)
+    val ratingScore = scaledPredictRatings.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_PREDICT_RATING))
+
+    val urls = recommendation.map(_.product)
+    val lastSharedTimes = metadata.filter(tuple => urls.contains(tuple._2))
+                                 .map(tuple => (tuple._2, tuple._4.toDouble))
+                                 .reduceByKey( (a, b) => max(a, b) )
+                                 .sortBy(_._2, false)
+                                 .collect()
+    val scaledLastSharedTimes = scale(lastSharedTimes)
+    val shareTimeScore = scaledLastSharedTimes.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_SHARE_TIME))
+
+    val overallScore = ( ratingScore ++ shareTimeScore ).groupBy(_._1)
+                                                      .mapValues(_.map(_._2).sum)
+                                                      .toArray
+                                                      .sortBy(-_._2)
+
+    logger.debug("overallScore\n" + overallScore.mkString("\n"))
+    return overallScore.map(_._1)
+  }
+
+  def scale(input: Array[(String, Double)]): Array[(String, Double)] = {
+    val min = input.minBy(_._2)._2
+    val temp = input.map(tuple => (tuple._1, tuple._2 - min))
+    val max = temp.maxBy(_._2)._2
+    val ret = temp.map(tuple => (tuple._1, tuple._2 / max))
+    return ret
+  }
 } 
