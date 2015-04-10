@@ -11,6 +11,8 @@ import org.apache.hadoop.hbase.mapreduce.TableInputFormat
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.util.Bytes
 
+import scala.math._
+
 object LinkRec {
 
   final val DB_TABLE = "linkrec"
@@ -37,7 +39,7 @@ object LinkRec {
     val recommendation = predict(ratingData, targetUser)
     logger.debug(recommendation.mkString("\n"))
 
-    val reclinks = rank(recommendation, data)
+    val reclinks = rank(recommendation.map(_.product), data)
 
     var linkTitleMap = data.filter(tuple => reclinks.contains(tuple._2))
                            .map(tuple => (tuple._2, tuple._3))
@@ -98,7 +100,7 @@ object LinkRec {
     val prediction = model.predict(userData).collect().filter(_.rating >= 0).sortBy(-_.rating).take(RECOMMENDATION_NUMBER)
 
     logger.debug("complete predicting")
-    return prediction;
+    return prediction
   }
 
   def trainData(data: RDD[Rating]): MatrixFactorizationModel = {
@@ -107,14 +109,31 @@ object LinkRec {
     val model = ALS.trainImplicit(data, TRAINING_RANK, TRAINING_NUM_ITERATIONS)
 
     logger.debug("complete training data")
-    return model;
+    return model
   }
 
-  def rank(target: Array[Rating], data: RDD[(String, String, String, Long)]): Array[String] = {
+  def rank(urls: Array[String], data: RDD[(String, String, String, Long)]): Array[String] = {
     logger.debug("start ranking")
 
+    val timeScore = data.filter(tuple => urls.contains(tuple._2))
+         .map(tuple => (tuple._2, tuple._4))
+         .reduceByKey( (a, b) => max(a, b) )
+         .collect()
+         .sortBy(-_._2)
+         .map(_._1)
+         .zipWithIndex
+         .map(tuple => (tuple._1, tuple._2 * 0.25) )
+
+    val ratingScore = urls.zipWithIndex.map(tuple => (tuple._1, tuple._2 * 0.75) )
+
+    val rankedUrls = ( timeScore ++ ratingScore ).groupBy(_._1)
+                                                    .mapValues(_.map(_._2).sum)
+                                                    .toArray
+                                                    .sortBy(_._2)
+                                                    .map(_._1)
+
     logger.debug("complete ranking")
-    return target.map(_.product);
+    return rankedUrls
   }
 
 } 
