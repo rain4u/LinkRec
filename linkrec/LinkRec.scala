@@ -13,6 +13,11 @@ import org.apache.hadoop.hbase.util.Bytes
 
 object LinkRec {
 
+  final val DB_TABLE = "linkrec"
+  final val TRAINING_RANK = 10
+  final val TRAINING_NUM_ITERATIONS = 20
+  final val RECOMMENDATION_NUMBER = 20
+
   val logger = Logger("LinkRec")
 
   def main(args: Array[String]) {
@@ -22,73 +27,46 @@ object LinkRec {
       sys.exit(1)
     }
 
-    // set up environment
-
-    val conf = new SparkConf().setAppName("LinkRec")
-    val sc = new SparkContext(conf)
+    val sc = init()
     
     // load data, data in tuple (user: String, url: String, title: String, time: Long)
-    logger.warn("start loading data")
     val data = loadDataFromDB(sc)
-    logger.warn("complete loading data")
-    // println("[XC] Data: ")
-    // data.collect().foreach(println)
+    val targetUser = args(0)
 
-    // get training data
+    val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0))
+    val recommendation = predict(ratingData, targetUser)
+    logger.debug(recommendation.mkString("\n"))
 
-    val trainingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0))
+    val reclinks = rank(recommendation, data)
 
-    // println("[XC] trainingData: ")
-    // trainingData.collect().foreach(println)
-
-    // Build the recommendation model using ALS
-    logger.warn("start training data")
-    var model = getBestModel(trainingData)
-    logger.warn("complete training data")
-    // get target user id
-
-    val userID = args(0) // String
-
-    val sharedLinks = data.filter(_._1 == userID).map(_._2)
-    val allLinks = data.map(_._2).distinct()
-    val unsharedLinks = allLinks.subtract(sharedLinks)
-
-    val userData = unsharedLinks.map((userID, _))
-
-    // println("[XC] User Data: ")
-    // userData.collect().foreach(println)
-
-    // recommendation
-    logger.warn("start prediction")
-    val predictions = model.predict(userData).collect().filter(_.rating >= 0).sortBy(-_.rating).take(50)
-    logger.warn(predictions.mkString("\n"))
-
-    val reclinks = predictions.map(_.product)
-
-    // ranking TODO
-    logger.warn("start building map")
     var linkTitleMap = data.filter(tuple => reclinks.contains(tuple._2))
                            .map(tuple => (tuple._2, tuple._3))
                            .distinct()
                            .collectAsMap()
-    
-    logger.warn(linkTitleMap.mkString("\n"))
 
     var reclinksWithTitle = reclinks.map(url => 
                             "{\"url\":\"" + url + "\", \"title\":\"" + linkTitleMap.get(url).get + "\"}");
 
     print("{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}")
 
-    // val reclinks = model.recommendProducts(userID, 50)
-    // println(reclinks.mkString("\n"))
-
-    // clean up
     sc.stop()
   }
 
+  def init(): SparkContext = {
+    logger.debug("start initializing spark")
+
+    val conf = new SparkConf().setAppName("LinkRec")
+    val sc = new SparkContext(conf)
+
+    logger.debug("complete initializing spark")
+    return sc
+  }
+
   def loadDataFromDB(sc: SparkContext): RDD[(String, String, String, Long)] = {
+    logger.debug("start loading data")
+
     val conf = HBaseConfiguration.create()
-    conf.set(TableInputFormat.INPUT_TABLE, "linkrec")
+    conf.set(TableInputFormat.INPUT_TABLE, DB_TABLE)
 
     val hBaseRDD = sc.newAPIHadoopRDD(conf, classOf[TableInputFormat],
       classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
@@ -100,14 +78,43 @@ object LinkRec {
                           Bytes.toString(CellUtil.cloneQualifier(cell)),
                           Bytes.toString(CellUtil.cloneValue(cell)),
                           cell.getTimestamp()) ))
+                  .cache()
     
-    return ratings.cache()
+    logger.debug("complete loading data")
+    return ratings
   }
 
-  def getBestModel(data: RDD[Rating]): MatrixFactorizationModel = {
-    val rank = 10
-    val numIterations = 20
-    val model = ALS.trainImplicit(data, rank, numIterations)
+  def predict(ratings: RDD[Rating], user: String): Array[Rating] = {
+    logger.debug("start predicting")
+
+    var model = trainData(ratings)
+
+    val sharedLinks = ratings.filter(_.user == user).map(_.product)
+    val allLinks = ratings.map(_.product).distinct()
+    val unsharedLinks = allLinks.subtract(sharedLinks)
+
+    val userData = unsharedLinks.map((user, _))
+
+    val prediction = model.predict(userData).collect().filter(_.rating >= 0).sortBy(-_.rating).take(RECOMMENDATION_NUMBER)
+
+    logger.debug("complete predicting")
+    return prediction;
+  }
+
+  def trainData(data: RDD[Rating]): MatrixFactorizationModel = {
+    logger.debug("start training data")
+
+    val model = ALS.trainImplicit(data, TRAINING_RANK, TRAINING_NUM_ITERATIONS)
+
+    logger.debug("complete training data")
     return model;
   }
+
+  def rank(target: Array[Rating], data: RDD[(String, String, String, Long)]): Array[String] = {
+    logger.debug("start ranking")
+
+    logger.debug("complete ranking")
+    return target.map(_.product);
+  }
+
 } 
