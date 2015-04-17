@@ -11,3 +11,11 @@ libraryDependencies ++= Seq(
   "org.apache.hbase" % "hbase-common" % "1.0.0",
   "org.apache.hbase" % "hbase-server" % "1.0.0"
 )
+
+mergeStrategy in assembly <<= (mergeStrategy in assembly) { mergeStrategy => {
+  case entry => {
+    val strategy = mergeStrategy(entry)
+      if (strategy == MergeStrategy.deduplicate) MergeStrategy.first
+      else strategy
+  }
+}}
