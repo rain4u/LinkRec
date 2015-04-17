@@ -1,0 +1,6 @@
+linkrec/project/project/
+linkrec/project/target/
+linkrec/target/
+server/err.log
+server/out.log
+server/node_modules/
