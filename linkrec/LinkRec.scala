@@ -6,7 +6,8 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
 import org.apache.spark.mllib.recommendation.{ALS, Rating, MatrixFactorizationModel}
 
-import org.apache.hadoop.hbase.{HBaseConfiguration, HTableDescriptor, TableName}
+import org.apache.hadoop.hbase.HBaseConfiguration
+import org.apache.hadoop.hbase.client.{HTable, Put}
 import org.apache.hadoop.hbase.mapreduce.TableInputFormat
 import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.hbase.util.Bytes
@@ -26,31 +27,20 @@ object LinkRec {
 
   def main(args: Array[String]) {
 
-    if (args.length != 1) {
-      println("Usage: YOUR_SPARK_HOME/bin/spark-submit --class LinkRec --master yarn-cluster target/scala-*/*.jar <userID>")
-      sys.exit(1)
-    }
-
     val sc = init()
     
     // load data, data in tuple (user: String, url: String, title: String, time: Long)
     val data = loadDataFromDB(sc)
-    val targetUser = args(0)
+    val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0)).cache()
+    val linkToTitle = data.map(tuple => (tuple._2, tuple._3)).distinct().collect().toMap
 
-    val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0))
-    val recommendation: Array[Rating] = predict(ratingData, targetUser)
+    val allUsers = data.map(_._1).distinct()
+    val allRecLinks = allUsers.map(user => (user, predict(ratingData, user)))
+                              .map(tuple => (tuple._1, rank(tuple._2, data)))
 
-    val reclinks = rank(recommendation, data)
+    val allResults = allRecLinks.map(tuple => (tuple._1, generateResult(tuple._2, linkToTitle)))
 
-    var linkTitleMap = data.filter(tuple => reclinks.contains(tuple._2))
-                           .map(tuple => (tuple._2, tuple._3))
-                           .distinct()
-                           .collectAsMap()
-
-    var reclinksWithTitle = reclinks.map(url => 
-                            "{\"url\":\"" + url + "\", \"title\":\"" + linkTitleMap.get(url).get + "\"}");
-
-    print("{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}")
+    writeResultsToDB(sc, allResults)
 
     sc.stop()
   }
@@ -181,5 +171,35 @@ object LinkRec {
     val max = temp.maxBy(_._2)._2
     val ret = temp.map(tuple => (tuple._1, tuple._2 / max))
     return ret
+  }
+
+  def generateResult(reclinks: Array[String], linkToTitle: Map[String, String]): String = {
+    var reclinksWithTitle = reclinks.map(url =>
+                            "{\"url\":\"" + url + "\", \"title\":\"" + linkToTitle.get(url).get + "\"}");
+
+    return "{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}"
+  }
+
+  def writeResultsToDB(sc: SparkContext, results: RDD[(String, String)]) = {
+    logger.warn("start writing results to DB")
+
+    val conf = HBaseConfiguration.create()
+    val table = new HTable(conf, DB_TABLE)
+
+    logger.warn(results.partitioner.size)
+    results.coalesce(3)
+    results.foreachPartition { partition =>
+      val conf = HBaseConfiguration.create()
+      val table = new HTable(conf, DB_TABLE)
+      partition.foreach { rdd =>
+        val put = new Put(Bytes.toBytes(rdd._1))
+        put.add(Bytes.toBytes("rec"), Bytes.toBytes("results"), Bytes.toBytes(rdd._2))
+        table.put(put)
+      }
+      table.flushCommits()
+      table.close()
+    }
+
+    logger.warn("complete writing results")
   }
 } 

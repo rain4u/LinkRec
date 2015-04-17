@@ -7,22 +7,16 @@ var exec = require('child_process').exec;
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-
+var newlyAdded = 0;
 
 // run recommendation api
 
+function getRecommendation(user) {
+  // TODO read from hbase
+}
+
 app.get('/getRec', function(req, res){
-
-  var command = '/usr/local/spark/bin/spark-submit --class LinkRec --jars /usr/local/hbase/lib/hbase-protocol-1.0.0.jar,/usr/local/hbase/lib/hbase-common-1.0.0.jar,/usr/local/hbase/lib/hbase-client-1.0.0.jar,/usr/local/hbase/lib/zookeeper-3.4.6.jar,/usr/local/hbase/lib/guava-12.0.1.jar,/usr/local/hbase/lib/protobuf-java-2.5.0.jar,/usr/local/hbase/lib/htrace-core-3.1.0-incubating.jar,/usr/local/hbase/lib/hbase-server-1.0.0.jar,/home/ec2-user/linkrec/lib/grizzled-slf4j_2.10-1.0.2.jar ~/linkrec/target/scala-2.10/linkrec_2.10-1.0.jar ' + req.query.user;
-
-  exec(command, function (error, stdout, stderr) {
-
-    console.log('[Output]');
-    console.log(stdout);
-
-    res.json(JSON.parse(stdout));
-  });
-
+  res.json(getRecommendation(req.query.user));
 });
 
 
@@ -90,6 +84,7 @@ function writeToDB(input) {
 }
 
 app.post('/sendLink', function (req, res) {
+  newlyAdded++;
   var status = writeToDB(req.body); //input
   if (status.code == 200) res.status(200).end();
   else res.status(status.code).send(status.message);
@@ -136,3 +131,18 @@ app.delete('/reset', function (req, res) {
 });
 
 app.listen(3000);
+
+var command = '/usr/local/spark-xc/bin/spark-submit --class LinkRec --master spark://spark:7077 --executor-memory 2g --total-executor-cores 6 ~/LinkRec/linkrec/target/scala-2.10/LinkRec-assembly-1.0.jar';
+
+function trainData() {
+  if (newlyAdded > 0) {
+    var temp = newlyAdded;
+    exec(command, function (error, stdout, stderr) {
+      if (!error) {
+        newlyAdded -= temp;
+      }
+    });
+  }
+}
+
+setInterval(trainData, 300000);
