@@ -9,14 +9,23 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 var newlyAdded = 0;
 
-// run recommendation api
-
-function getRecommendation(user) {
-  // TODO read from hbase
-}
+// get recommendation api
 
 app.get('/getRec', function(req, res){
-  res.json(getRecommendation(req.query.user));
+  request({
+    url: 'http://localhost:8000/linkrec/' + req.query.user + '/rec:results',
+    method: 'GET', 
+  }, function (error, response, body){
+    if (error) {
+      res.status(response.statusCode).send(response.statusMessage);
+    } else {
+      var result = {};
+      if (response.statusCode == 200) result = JSON.parse(body);
+
+      console.log('[Output] user:' + req.query.user, result);
+      res.json(result);
+    }
+  });
 });
 
 
@@ -38,8 +47,7 @@ function writeToDB(input) {
   // for input, only one user and a list of links
   // { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
   
-  console.log('[Input]');
-  console.log(input);
+  console.log('[Input]', input);
 
   var data = {'Row': [{}]};
 
@@ -65,8 +73,7 @@ function writeToDB(input) {
 
   var status = {'code': 200, 'message': ''};
 
-  console.log('[Request Data]');
-  console.log(JSON.stringify(data));
+  console.log('[Request Data]', JSON.stringify(data));
 
   request({
     url: 'http://localhost:8000/linkrec/falserow',
@@ -136,13 +143,21 @@ var command = '/usr/local/spark-xc/bin/spark-submit --class LinkRec --master spa
 
 function trainData() {
   if (newlyAdded > 0) {
+    console.log('[Spark] Training data...')
     var temp = newlyAdded;
     exec(command, function (error, stdout, stderr) {
       if (!error) {
         newlyAdded -= temp;
+        console.log('[Spark] Training completed')
+      } else {
+        console.log(error);
+        console.log(stdout);
+        console.log(stderr);
       }
     });
+  } else {
+    console.log('[Spark] No newly added data')
   }
 }
 
-setInterval(trainData, 300000);
+setInterval(trainData, 300000); // 5min

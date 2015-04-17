@@ -17,6 +17,9 @@ import scala.math._
 object LinkRec {
 
   final val DB_TABLE = "linkrec"
+  final val COLUMN_FAMILY_LINK = "link"
+  final val COLUMN_FAMILY_REC = "rec"
+  final val COLUMN_RESULTS = "results"
   final val TRAINING_RANK = 10
   final val TRAINING_NUM_ITERATIONS = 20
   final val RECOMMENDATION_NUMBER = 20
@@ -34,13 +37,14 @@ object LinkRec {
     val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0)).cache()
     val linkToTitle = data.map(tuple => (tuple._2, tuple._3)).distinct().collect().toMap
 
-    val allUsers = data.map(_._1).distinct()
-    val allRecLinks = allUsers.map(user => (user, predict(ratingData, user)))
-                              .map(tuple => (tuple._1, rank(tuple._2, data)))
+    val model = trainData(ratingData)
 
-    val allResults = allRecLinks.map(tuple => (tuple._1, generateResult(tuple._2, linkToTitle)))
-
-    writeResultsToDB(sc, allResults)
+    val allUsers = data.map(_._1).distinct().collect()
+    allUsers.foreach(user => {
+      var reclinks = predict(model, ratingData, user).map(_.product)
+      var results = generateResult(reclinks, linkToTitle)
+      writeResultsToDB(user, results)
+    })
 
     sc.stop()
   }
@@ -64,6 +68,7 @@ object LinkRec {
 
     val conf = HBaseConfiguration.create()
     conf.set(TableInputFormat.INPUT_TABLE, DB_TABLE)
+    conf.set(TableInputFormat.SCAN_COLUMN_FAMILY, COLUMN_FAMILY_LINK)
 
     val hBaseRDD = sc.newAPIHadoopRDD(conf, classOf[TableInputFormat],
       classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
@@ -83,10 +88,8 @@ object LinkRec {
 
 
 
-  def predict(ratings: RDD[Rating], user: String): Array[Rating] = {
+  def predict(model: MatrixFactorizationModel, ratings: RDD[Rating], user: String): Array[Rating] = {
     logger.debug("start predicting")
-
-    var model = trainData(ratings)
 
     val sharedLinks = ratings.filter(_.user == user).map(_.product)
     val allLinks = ratings.map(_.product).distinct()
@@ -180,25 +183,14 @@ object LinkRec {
     return "{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}"
   }
 
-  def writeResultsToDB(sc: SparkContext, results: RDD[(String, String)]) = {
+  def writeResultsToDB(user: String, results: String) = {
     logger.warn("start writing results to DB")
 
     val conf = HBaseConfiguration.create()
     val table = new HTable(conf, DB_TABLE)
-
-    logger.warn(results.partitioner.size)
-    results.coalesce(3)
-    results.foreachPartition { partition =>
-      val conf = HBaseConfiguration.create()
-      val table = new HTable(conf, DB_TABLE)
-      partition.foreach { rdd =>
-        val put = new Put(Bytes.toBytes(rdd._1))
-        put.add(Bytes.toBytes("rec"), Bytes.toBytes("results"), Bytes.toBytes(rdd._2))
-        table.put(put)
-      }
-      table.flushCommits()
-      table.close()
-    }
+    val put = new Put(Bytes.toBytes(user))
+    put.add(Bytes.toBytes(COLUMN_FAMILY_REC), Bytes.toBytes(COLUMN_RESULTS), Bytes.toBytes(results))
+    table.put(put)
 
     logger.warn("complete writing results")
   }
