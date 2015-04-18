@@ -43,21 +43,21 @@ function escape(str) {
     .replace(/[\t]/g, '\\t');
 }
 
-function writeToDB(input) {
+function writeToDB(args) {
   // for input, only one user and a list of links
   // { user: id, links: [ { url: url, title: name, time: timestamp }, ... ] }
   
-  console.log('[Input]', input);
+  console.log('[Input]', args.input);
 
   var data = {'Row': [{}]};
 
-  var user = new Buffer(input.user).toString('base64');
+  var user = new Buffer(args.input.user).toString('base64');
   var row = data.Row[0];
 
   row.key = user;
   row.Cell = [];
 
-  var links = input.links;
+  var links = args.input.links;
   var linkNum = links.length;
 
   for (var i = 0; i < linkNum; i++) {
@@ -71,8 +71,6 @@ function writeToDB(input) {
 
   }
 
-  var status = {'code': 200, 'message': ''};
-
   console.log('[Request Data]', JSON.stringify(data));
 
   request({
@@ -81,20 +79,27 @@ function writeToDB(input) {
     json: true,
     body: data
   }, function (error, response, body){
-    if (error) {
-      status.code = response.statusCode;
-      status.message = response.statusMessage;
+    if (!error) {
+      args.success(response.statusCode);
+    } else if (args.error) {
+      args.error(response.statusCode, response.statusMessage);
+    } else {
+      console.error(response);
     }
   });
-  
-  return status;
 }
 
 app.post('/sendLink', function (req, res) {
-  newlyAdded++;
-  var status = writeToDB(req.body); //input
-  if (status.code == 200) res.status(200).end();
-  else res.status(status.code).send(status.message);
+  writeToDB({
+    input: req.body,
+    success: function (statusCode) {
+      newlyAdded++;
+      res.status(statusCode).end();
+    },
+    error: function (statusCode, statusMessage) {
+      res.status(statusCode).send(statusMessage);
+    }
+  });
 });
 
 
