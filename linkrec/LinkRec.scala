@@ -17,9 +17,6 @@ import scala.math._
 object LinkRec {
 
   final val DB_TABLE = "linkrec"
-  final val COLUMN_FAMILY_LINK = "link"
-  final val COLUMN_FAMILY_REC = "rec"
-  final val COLUMN_RESULTS = "results"
   final val TRAINING_RANK = 10
   final val TRAINING_NUM_ITERATIONS = 20
   final val RECOMMENDATION_NUMBER = 20
@@ -37,14 +34,16 @@ object LinkRec {
     val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0)).cache()
     val linkToTitle = data.map(tuple => (tuple._2, tuple._3)).distinct().collect().toMap
 
-    val model = trainData(ratingData)
+    val allRecommendation: RDD[Rating] = predict(ratingData)
+    val usersRecLinks = allRecommendation.map(rating => (rating.user, rating))
+                                         .combineByKey(rating => Array(rating),
+                                                       (array: Array[Rating], rating) => array :+ rating,
+                                                       (array1: Array[Rating], array2: Array[Rating]) => array1 ++ array2)
+                                         .map(tuple => (tuple._1, tuple._2.sortBy(-_.rating).take(RECOMMENDATION_NUMBER)))
 
-    val allUsers = data.map(_._1).distinct().collect()
-    allUsers.foreach(user => {
-      var reclinks = predict(model, ratingData, user).map(_.product)
-      var results = generateResult(reclinks, linkToTitle)
-      writeResultsToDB(user, results)
-    })
+    val allResults = usersRecLinks.map(tuple => (tuple._1, generateResult(tuple._2.map(_.product), linkToTitle)))
+
+    writeResultsToDB(sc, allResults)
 
     sc.stop()
   }
@@ -52,23 +51,22 @@ object LinkRec {
 
 
   def init(): SparkContext = {
-    logger.debug("start initializing spark")
+    logger.warn("start initializing spark")
 
     val conf = new SparkConf().setAppName("LinkRec")
     val sc = new SparkContext(conf)
 
-    logger.debug("complete initializing spark")
+    logger.warn("complete initializing spark")
     return sc
   }
 
 
 
   def loadDataFromDB(sc: SparkContext): RDD[(String, String, String, Long)] = {
-    logger.debug("start loading data")
+    logger.warn("start loading data")
 
     val conf = HBaseConfiguration.create()
     conf.set(TableInputFormat.INPUT_TABLE, DB_TABLE)
-    conf.set(TableInputFormat.SCAN_COLUMN_FAMILY, COLUMN_FAMILY_LINK)
 
     val hBaseRDD = sc.newAPIHadoopRDD(conf, classOf[TableInputFormat],
       classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
@@ -81,45 +79,53 @@ object LinkRec {
                           Bytes.toString(CellUtil.cloneValue(cell)),
                           cell.getTimestamp()) ))
                   .cache()
-    
-    logger.debug("complete loading data")
+
+    logger.warn("complete loading data")
     return ratings
   }
 
 
 
-  def predict(model: MatrixFactorizationModel, ratings: RDD[Rating], user: String): Array[Rating] = {
-    logger.debug("start predicting")
+  def predict(ratings: RDD[Rating]): RDD[Rating] = {
+    logger.warn("start predicting")
 
-    val sharedLinks = ratings.filter(_.user == user).map(_.product)
-    val allLinks = ratings.map(_.product).distinct()
-    val unsharedLinks = allLinks.subtract(sharedLinks)
+    val model = trainData(ratings)
+    val usersNotSharedProducts = generateUsersNotSharedProducts(ratings)
 
-    val userData = unsharedLinks.map((user, _))
+    val prediction = model.predict(usersNotSharedProducts).filter(_.rating >= 0)
 
-    val prediction = model.predict(userData).filter(_.rating >= 0).sortBy(_.rating, false).take(RECOMMENDATION_NUMBER)
-
-    logger.debug("complete predicting; prediction result\n" + prediction.mkString("\n"))
+    logger.warn("complete predicting")
     return prediction
   }
 
-  def trainData(data: RDD[Rating]): MatrixFactorizationModel = {
-    logger.debug("start training data")
+  def trainData(ratings: RDD[Rating]): MatrixFactorizationModel = {
+    logger.warn("start training data")
 
-    val model = ALS.trainImplicit(data, TRAINING_RANK, TRAINING_NUM_ITERATIONS)
+    val model = ALS.trainImplicit(ratings, TRAINING_RANK, TRAINING_NUM_ITERATIONS)
 
-    logger.debug("complete training data")
+    logger.warn("complete training data")
     return model
+  }
+
+  def generateUsersNotSharedProducts(ratings: RDD[Rating]): RDD[(String, String)] = {
+    val allProducts = ratings.map(_.product).distinct()
+    val allUsers = ratings.map(_.user).distinct()
+    val usersProducts = allUsers.cartesian(allProducts)
+
+    val usersSharedProducts = ratings.map(rating => (rating.user, rating.product))
+    val usersNotSharedProducts = usersProducts.subtract(usersSharedProducts)
+
+    return usersNotSharedProducts
   }
 
 
 
   def rank(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
-    logger.debug("start ranking")
+    logger.warn("start ranking")
 
     val reclinks = rankByScaledValue(recommendation, metadata)
 
-    logger.debug("complete ranking")
+    logger.warn("complete ranking")
     return reclinks
   }
 
@@ -141,7 +147,7 @@ object LinkRec {
                                                     .toArray
                                                     .sortBy(_._2)
     
-    logger.debug("overallScore\n" + overallScore.mkString("\n"))
+    logger.warn("overallScore\n" + overallScore.mkString("\n"))
     return overallScore.map(_._1)
   }
 
@@ -164,7 +170,7 @@ object LinkRec {
                                                       .toArray
                                                       .sortBy(-_._2)
 
-    logger.debug("overallScore\n" + overallScore.mkString("\n"))
+    logger.warn("overallScore\n" + overallScore.mkString("\n"))
     return overallScore.map(_._1)
   }
 
@@ -183,14 +189,24 @@ object LinkRec {
     return "{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}"
   }
 
-  def writeResultsToDB(user: String, results: String) = {
+  def writeResultsToDB(sc: SparkContext, results: RDD[(String, String)]) = {
     logger.warn("start writing results to DB")
 
     val conf = HBaseConfiguration.create()
     val table = new HTable(conf, DB_TABLE)
-    val put = new Put(Bytes.toBytes(user))
-    put.add(Bytes.toBytes(COLUMN_FAMILY_REC), Bytes.toBytes(COLUMN_RESULTS), Bytes.toBytes(results))
-    table.put(put)
+
+    results.coalesce(3)
+    results.foreachPartition { partition =>
+      val conf = HBaseConfiguration.create()
+      val table = new HTable(conf, DB_TABLE)
+      partition.foreach { rdd =>
+        val put = new Put(Bytes.toBytes(rdd._1))
+        put.add(Bytes.toBytes("rec"), Bytes.toBytes("results"), Bytes.toBytes(rdd._2))
+        table.put(put)
+      }
+      table.flushCommits()
+      table.close()
+    }
 
     logger.warn("complete writing results")
   }
