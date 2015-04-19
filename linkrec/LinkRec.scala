@@ -14,17 +14,25 @@ import org.apache.hadoop.hbase.util.Bytes
 
 import scala.math._
 
+case class Link(url: String, title: String, latestShared: Long, sharedTimes: Long)
+case class Sharing(user: String, link: Link)
+case class Recommendation(user: String, link: Link, rating: Double)
+
 object LinkRec {
 
   final val DB_TABLE = "linkrec"
   final val COLUMN_FAMILY_LINK = "link"
   final val COLUMN_FAMILY_REC = "rec"
   final val COLUMN_RESULTS = "results"
+
   final val TRAINING_RANK = 10
   final val TRAINING_NUM_ITERATIONS = 20
+
   final val RECOMMENDATION_NUMBER = 20
-  final val RANK_WEIGHT_SHARE_TIME = 0.25
-  final val RANK_WEIGHT_PREDICT_RATING = 0.75
+
+  final val RANK_WEIGHT_RATING = 0.6
+  final val RANK_WEIGHT_FRESHNESS = 0.25
+  final val RANK_WEIGHT_POPULARITY = 0.15
 
   val logger = Logger("LinkRec")
 
@@ -32,21 +40,23 @@ object LinkRec {
 
     val sc = init()
     
-    // load data, data in tuple (user: String, url: String, title: String, time: Long)
-    val data = loadDataFromDB(sc)
-    val ratingData = data.map(tuple => Rating(tuple._1, tuple._2, 1.0)).cache()
-    val linkToTitle = data.map(tuple => (tuple._2, tuple._3)).distinct().collect().toMap
+    val data: RDD[Sharing] = loadDataFromDB(sc)
 
-    val allRecommendation: RDD[Rating] = predict(ratingData)
-    val usersRecLinks = allRecommendation.map(rating => (rating.user, rating))
-                                         .combineByKey(rating => Array(rating),
-                                                       (array: Array[Rating], rating) => array :+ rating,
-                                                       (array1: Array[Rating], array2: Array[Rating]) => array1 ++ array2)
-                                         .map(tuple => (tuple._1, tuple._2.sortBy(-_.rating).take(RECOMMENDATION_NUMBER)))
+    val ratingData: RDD[Rating] = data.map(sharing => Rating(sharing.user, sharing.link.url, 1.0)).cache()
+    val prediction: RDD[Rating] = predict(ratingData)
 
-    val allResults = usersRecLinks.map(tuple => (tuple._1, generateResult(tuple._2.map(_.product), linkToTitle)))
+    val urlRatingPair = prediction.map(rating => ( rating.product, rating ) )
+    val urlLinkPair = data.map(_.link).distinct().map(link => ( link.url, link ))
+    val recommendation: RDD[Recommendation] = urlRatingPair.join(urlLinkPair)
+                                                           .map(item => Recommendation( item._2._1.user, item._2._2, item._2._1.rating ))
 
-    writeResultsToDB(sc, allResults)
+    val usersRecommendation = recommendation.map(rec => (rec.user, rec))
+                                            .combineByKey(rec => Array(rec),
+                                                         (array: Array[Recommendation], rec) => array :+ rec,
+                                                         (array1: Array[Recommendation], array2: Array[Recommendation]) => array1 ++ array2)
+                                            .mapValues(rec => generateResult( rank( rec.sortBy(-_.rating).take(RECOMMENDATION_NUMBER) ) ))
+
+    writeResultsToDB(usersRecommendation)
 
     sc.stop()
   }
@@ -65,7 +75,7 @@ object LinkRec {
 
 
 
-  def loadDataFromDB(sc: SparkContext): RDD[(String, String, String, Long)] = {
+  def loadDataFromDB(sc: SparkContext): RDD[Sharing] = {
     logger.warn("start loading data")
 
     val conf = HBaseConfiguration.create()
@@ -76,16 +86,32 @@ object LinkRec {
       classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
       classOf[org.apache.hadoop.hbase.client.Result])
 
-    val ratings = hBaseRDD.map(item => item._2.raw())
-                  .flatMap(_.map( cell => (
-                          Bytes.toString(CellUtil.cloneRow(cell)), 
-                          Bytes.toString(CellUtil.cloneQualifier(cell)),
-                          Bytes.toString(CellUtil.cloneValue(cell)),
-                          cell.getTimestamp()) ))
-                  .cache()
+    // (user: String, url: String, title: String, time: Long)
+    val data: RDD[(String, String, String, Long)] = hBaseRDD.map(item => item._2.raw())
+                                                               .flatMap(_.map( cell => (
+                                                                       Bytes.toString(CellUtil.cloneRow(cell)), 
+                                                                       Bytes.toString(CellUtil.cloneQualifier(cell)),
+                                                                       Bytes.toString(CellUtil.cloneValue(cell)),
+                                                                       cell.getTimestamp()) ))
+                                                               .cache()
+
+    val title = data.map(item => (item._2, item._3))
+                    .distinct()
+    val lastShared = data.map(item => (item._2, item._4))
+                         .reduceByKey( (time1, time2) => max(time1, time2) )
+    val sharedTimes = data.map(item => (item._2, 1))
+                          .reduceByKey(_+_)
+
+    val links = title.cogroup(lastShared, sharedTimes)
+                     .map(item => ( item._1, Link( item._1, item._2._1.head, item._2._2.head, item._2._3.head ) ))
+    val users = data.map(item => (item._2, item._1))
+
+    val sharing = users.join(links)
+                       .map(item => Sharing( item._2._1, item._2._2 ))
+                       .cache()
 
     logger.warn("complete loading data")
-    return ratings
+    return sharing
   }
 
 
@@ -124,76 +150,42 @@ object LinkRec {
 
 
 
-  def rank(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
-    logger.warn("start ranking")
+  def rank(recommendation: Array[Recommendation]): Array[Recommendation] = {
+    if (recommendation.size < 2) return recommendation
 
-    val reclinks = rankByScaledValue(recommendation, metadata)
+    val factorTuple = recommendation.map(rec => ( rec, rec.rating, rec.link.latestShared, rec.link.sharedTimes ))
 
-    logger.warn("complete ranking")
-    return reclinks
-  }
+    val ratingMin = factorTuple.minBy(_._2)._2
+    val freshnessMin = factorTuple.minBy(_._3)._3
+    val popularityMin = factorTuple.minBy(_._4)._4
 
-  def rankByIndex(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
-    val urls = recommendation.map(_.product)
-    val timeScore = metadata.filter(tuple => urls.contains(tuple._2))
-         .map(tuple => (tuple._2, tuple._4))
-         .reduceByKey( (a, b) => max(a, b) )
-         .collect()
-         .sortBy(-_._2)
-         .map(_._1)
-         .zipWithIndex
-         .map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_SHARE_TIME) )
+    val tempScoreTuple = factorTuple.map(tuple => ( tuple._1, tuple._2 - ratingMin, tuple._3 - freshnessMin, tuple._4 - popularityMin ))
 
-    val ratingScore = urls.zipWithIndex.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_PREDICT_RATING) )
+    val ratingMax = tempScoreTuple.maxBy(_._2)._2
+    val freshnessMax = tempScoreTuple.maxBy(_._3)._3
+    val popularityMax = tempScoreTuple.maxBy(_._4)._4
 
-    val overallScore = ( timeScore ++ ratingScore ).groupBy(_._1)
-                                                    .mapValues(_.map(_._2).sum)
-                                                    .toArray
-                                                    .sortBy(_._2)
-    
-    logger.warn("overallScore\n" + overallScore.mkString("\n"))
+    val scaledScoreTuple = tempScoreTuple.map(tuple => ( tuple._1, tuple._2 / ratingMax, tuple._3 / freshnessMax, tuple._4 / popularityMax ))
+
+
+    val overallScore = scaledScoreTuple.map(tuple => 
+                            ( tuple._1, tuple._2 * RANK_WEIGHT_RATING + tuple._3 * RANK_WEIGHT_FRESHNESS + tuple._4 * RANK_WEIGHT_POPULARITY ))
+
     return overallScore.map(_._1)
   }
 
-  def rankByScaledValue(recommendation: Array[Rating], metadata: RDD[(String, String, String, Long)]): Array[String] = {
-    val predictRatings = recommendation.map(item => (item.product, item.rating) )
-    val scaledPredictRatings = scale(predictRatings)
-    val ratingScore = scaledPredictRatings.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_PREDICT_RATING))
 
-    val urls = recommendation.map(_.product)
-    val lastSharedTimes = metadata.filter(tuple => urls.contains(tuple._2))
-                                 .map(tuple => (tuple._2, tuple._4.toDouble))
-                                 .reduceByKey( (a, b) => max(a, b) )
-                                 .sortBy(_._2, false)
-                                 .collect()
-    val scaledLastSharedTimes = scale(lastSharedTimes)
-    val shareTimeScore = scaledLastSharedTimes.map(tuple => (tuple._1, tuple._2 * RANK_WEIGHT_SHARE_TIME))
 
-    val overallScore = ( ratingScore ++ shareTimeScore ).groupBy(_._1)
-                                                      .mapValues(_.map(_._2).sum)
-                                                      .toArray
-                                                      .sortBy(-_._2)
-
-    logger.warn("overallScore\n" + overallScore.mkString("\n"))
-    return overallScore.map(_._1)
-  }
-
-  def scale(input: Array[(String, Double)]): Array[(String, Double)] = {
-    val min = input.minBy(_._2)._2
-    val temp = input.map(tuple => (tuple._1, tuple._2 - min))
-    val max = temp.maxBy(_._2)._2
-    val ret = temp.map(tuple => (tuple._1, tuple._2 / max))
-    return ret
-  }
-
-  def generateResult(reclinks: Array[String], linkToTitle: Map[String, String]): String = {
-    var reclinksWithTitle = reclinks.map(url =>
-                            "{\"url\":\"" + url + "\", \"title\":\"" + linkToTitle.get(url).get + "\"}");
+  def generateResult(recommendations: Array[Recommendation]): String = {
+    var reclinksWithTitle = recommendations.map(rec =>
+                              "{\"url\":\"" + rec.link.url + "\", \"title\":\"" + rec.link.title + "\"}");
 
     return "{\"reclinks\": [" + reclinksWithTitle.mkString(", ") + "]}"
   }
 
-  def writeResultsToDB(sc: SparkContext, results: RDD[(String, String)]) = {
+
+
+  def writeResultsToDB(results: RDD[(String, String)]) = {
     logger.warn("start writing results to DB")
 
     val conf = HBaseConfiguration.create()
