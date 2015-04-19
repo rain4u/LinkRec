@@ -171,7 +171,7 @@ object LinkRec {
     val overallScore = scaledScoreTuple.map(tuple => 
                             ( tuple._1, tuple._2 * RANK_WEIGHT_RATING + tuple._3 * RANK_WEIGHT_FRESHNESS + tuple._4 * RANK_WEIGHT_POPULARITY ))
 
-    return overallScore.map(_._1)
+    return overallScore.sortBy(-_._2).map(_._1)
   }
 
 
