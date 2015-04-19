@@ -161,9 +161,12 @@ object LinkRec {
 
     val tempScoreTuple = factorTuple.map(tuple => ( tuple._1, tuple._2 - ratingMin, tuple._3 - freshnessMin, tuple._4 - popularityMin ))
 
-    val ratingMax = tempScoreTuple.maxBy(_._2)._2
-    val freshnessMax = tempScoreTuple.maxBy(_._3)._3
-    val popularityMax = tempScoreTuple.maxBy(_._4)._4
+    var ratingMax = tempScoreTuple.maxBy(_._2)._2
+    if (ratingMax == 0) ratingMax = 1;
+    var freshnessMax = tempScoreTuple.maxBy(_._3)._3
+    if (freshnessMax == 0) freshnessMax = 1;
+    var popularityMax = tempScoreTuple.maxBy(_._4)._4
+    if (popularityMax == 0) popularityMax = 1;
 
     val scaledScoreTuple = tempScoreTuple.map(tuple => ( tuple._1, tuple._2 / ratingMax, tuple._3 / freshnessMax, tuple._4 / popularityMax ))
 
