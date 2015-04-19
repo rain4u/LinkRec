@@ -17,6 +17,9 @@ import scala.math._
 object LinkRec {
 
   final val DB_TABLE = "linkrec"
+  final val COLUMN_FAMILY_LINK = "link"
+  final val COLUMN_FAMILY_REC = "rec"
+  final val COLUMN_RESULTS = "results"
   final val TRAINING_RANK = 10
   final val TRAINING_NUM_ITERATIONS = 20
   final val RECOMMENDATION_NUMBER = 20
@@ -67,12 +70,13 @@ object LinkRec {
 
     val conf = HBaseConfiguration.create()
     conf.set(TableInputFormat.INPUT_TABLE, DB_TABLE)
+    conf.set(TableInputFormat.SCAN_COLUMN_FAMILY, COLUMN_FAMILY_LINK)
 
     val hBaseRDD = sc.newAPIHadoopRDD(conf, classOf[TableInputFormat],
       classOf[org.apache.hadoop.hbase.io.ImmutableBytesWritable],
       classOf[org.apache.hadoop.hbase.client.Result])
 
-    val ratings = hBaseRDD.map(_._2).map(_.raw())
+    val ratings = hBaseRDD.map(item => item._2.raw())
                   .flatMap(_.map( cell => (
                           Bytes.toString(CellUtil.cloneRow(cell)), 
                           Bytes.toString(CellUtil.cloneQualifier(cell)),
@@ -201,7 +205,7 @@ object LinkRec {
       val table = new HTable(conf, DB_TABLE)
       partition.foreach { rdd =>
         val put = new Put(Bytes.toBytes(rdd._1))
-        put.add(Bytes.toBytes("rec"), Bytes.toBytes("results"), Bytes.toBytes(rdd._2))
+        put.add(Bytes.toBytes(COLUMN_FAMILY_REC), Bytes.toBytes(COLUMN_RESULTS), Bytes.toBytes(rdd._2))
         table.put(put)
       }
       table.flushCommits()
