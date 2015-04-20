@@ -8,6 +8,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 var newlyAdded = 0;
+var sparkRunning = false;
 
 // get recommendation api
 
@@ -82,6 +83,7 @@ function writeToDB(args) {
     if (!error) {
       args.success(response.statusCode);
     } else if (args.error) {
+      console.error(response);
       args.error(response.statusCode, response.statusMessage);
     } else {
       console.error(response);
@@ -94,6 +96,7 @@ app.post('/sendLink', function (req, res) {
     input: req.body,
     success: function (statusCode) {
       newlyAdded++;
+      if (!sparkRunning) runSpark();
       res.status(statusCode).end();
     },
     error: function (statusCode, statusMessage) {
@@ -146,14 +149,17 @@ app.listen(3000);
 
 var command = '/usr/local/spark-xc/bin/spark-submit --class LinkRec --master spark://spark:7077 --executor-memory 2g --total-executor-cores 6 ~/LinkRec/linkrec/target/scala-2.10/LinkRec-assembly-1.0.jar';
 
-function trainData() {
+function runSpark() {
   if (newlyAdded > 0) {
+    sparkRunning = true;
     console.log('[Spark] Training data...')
     var temp = newlyAdded;
     exec(command, function (error, stdout, stderr) {
       if (!error) {
-        newlyAdded -= temp;
         console.log('[Spark] Training completed')
+        newlyAdded -= temp;
+        sparkRunning = false;
+        runSpark();
       } else {
         console.log(error);
         console.log(stdout);
@@ -164,5 +170,3 @@ function trainData() {
     console.log('[Spark] No newly added data')
   }
 }
-
-setInterval(trainData, 300000); // 5min
